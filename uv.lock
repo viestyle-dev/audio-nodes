@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "audio-nodes"
-version = "0.3.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -32,7 +32,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "nonoha-core", git = "https://github.com/viestyle-dev/nonoha-core.git" },
+    { name = "nonoha-core", git = "https://github.com/viestyle-dev/nonoha-core.git?rev=v1.0.0" },
     { name = "pytest", specifier = ">=8.0" },
 ]
 
@@ -154,8 +154,8 @@ wheels = [
 
 [[package]]
 name = "nonoha-core"
-version = "0.11.0a7"
-source = { git = "https://github.com/viestyle-dev/nonoha-core.git#8398b8c4f777e11808753c21601d2af0f24b4777" }
+version = "1.0.0"
+source = { git = "https://github.com/viestyle-dev/nonoha-core.git?rev=v1.0.0#592bfd54de8fcfb64cbb0f7bcac705dc0304dbcf" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
