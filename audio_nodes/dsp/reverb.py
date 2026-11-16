@@ -25,36 +25,54 @@ _INPUT_GAIN = 0.015
 _ALLPASS_FEEDBACK = 0.5
 
 
-class _Comb:
-    __slots__ = ("buffer", "index", "store")
+class _CombBank:
+    """The damped combs of both channels, run together.
 
-    def __init__(self, delay: int):
-        self.buffer = np.zeros(delay, dtype=np.float64)
-        self.index = 0
-        self.store = 0.0
+    Every comb reads its ring buffer ``delay`` samples back, so a chunk of up
+    to the shortest delay never reads what it writes: each chunk copies all
+    combs' delayed samples into one array, runs one lfilter call for all of
+    them (rows), and writes the new values back. (One comb at a time needed a
+    filter call per comb and per wrap: ~60 calls per 0.1 s block.)
+    """
+
+    __slots__ = ("rings", "index", "store", "chunk")
+
+    def __init__(self, delays: list[int]):
+        self.rings = [np.zeros(d, dtype=np.float64) for d in delays]
+        self.index = [0] * len(delays)
+        self.store = np.zeros((len(delays), 1), dtype=np.float64)  # damping filter state
+        self.chunk = min(delays)
 
     def process(self, x: np.ndarray, feedback: float, damp: float, b: np.ndarray, a: np.ndarray) -> np.ndarray:
-        n, buffer = len(x), self.buffer
-        size = len(buffer)
-        out = np.empty(n)
-        pos, idx, store = 0, self.index, self.store
+        """Feed ``x`` to every comb; returns the combs' outputs (combs, n)."""
+        n = len(x)
+        rings, index = self.rings, self.index
+        out = np.empty((len(rings), n))
+        pos = 0
         while pos < n:
-            chunk = min(n - pos, size - idx)
-            delayed = out[pos : pos + chunk]
-            ring = buffer[idx : idx + chunk]
-            delayed[:] = ring
+            m = min(self.chunk, n - pos)
+            delayed = out[:, pos : pos + m]
+            for r, ring in enumerate(rings):
+                i = index[r]
+                first = min(m, len(ring) - i)  # up to the end of the ring, then wrap
+                delayed[r, :first] = ring[i : i + first]
+                if first < m:
+                    delayed[r, first:] = ring[: m - first]
             # One-pole damping (1 - damp) / (1 - damp z^-1); its state is damp * last output.
             # lfilter returns (y, zf) when zi is given; the stubs type it as a union.
-            filtered, _ = lfilter(b, a, delayed, zi=(store * damp,))  # type: ignore
-            store = float(filtered[-1])
+            filtered, _ = lfilter(b, a, delayed, axis=1, zi=self.store * damp)  # type: ignore
+            self.store = filtered[:, -1:].copy()
             filtered *= feedback
-            filtered += x[pos : pos + chunk]
-            ring[:] = filtered
-            idx += chunk
-            if idx == size:
-                idx = 0
-            pos += chunk
-        self.index, self.store = idx, store
+            filtered += x[pos : pos + m]
+            for r, ring in enumerate(rings):
+                i, size = index[r], len(ring)
+                first = min(m, size - i)
+                ring[i : i + first] = filtered[r, :first]
+                if first < m:
+                    ring[: m - first] = filtered[r, first:]
+                i += m
+                index[r] = i - size if i >= size else i
+            pos += m
         return out
 
 
@@ -120,9 +138,8 @@ class ReverbNode(BaseNode):
     def _build(self, sample_rate: int):
         scale = sample_rate / 44100.0
         spread = max(1, round(_STEREO_SPREAD * scale))
-        self._combs = [
-            [_Comb(max(1, round(d * scale)) + offset) for d in _COMB_DELAYS] for offset in (0, spread)
-        ]
+        # Left combs, then right combs (one bank, see _CombBank).
+        self._combs = _CombBank([max(1, round(d * scale)) + offset for offset in (0, spread) for d in _COMB_DELAYS])
         self._allpasses = [
             [_Allpass(max(1, round(d * scale)) + offset) for d in _ALLPASS_DELAYS] for offset in (0, spread)
         ]
@@ -149,11 +166,10 @@ class ReverbNode(BaseNode):
         mono = x[:, 0] + x[:, 1]  # float32 pair -> one new array
         mono *= _INPUT_GAIN
 
+        combs = self._combs.process(mono, feedback, damp, b, a)
+        sums = combs.reshape(2, len(_COMB_DELAYS), n).sum(axis=1)  # per channel
         wet = []
-        for combs, allpasses in zip(self._combs, self._allpasses):
-            acc = combs[0].process(mono, feedback, damp, b, a)
-            for comb in combs[1:]:
-                acc += comb.process(mono, feedback, damp, b, a)
+        for acc, allpasses in zip(sums, self._allpasses):
             for ap in allpasses:
                 acc = ap.process(acc)
             wet.append(acc)

@@ -267,6 +267,129 @@ def test_reverb_tail_and_dry_passthrough():
     np.testing.assert_allclose(out[0], x, atol=1e-6)
 
 
+# --- block algorithms match the plain per-sample definitions --------------------------------
+
+
+def _polyvoice_reference(pv: PolyVoiceNode, n: int) -> np.ndarray:
+    """The modal voice formula, evaluated directly (sin and exp per sample)."""
+    t = (pv._age[:, None] + np.arange(n)[None, :]) / SR
+    voice = np.zeros_like(t)
+    for ratio, weight, tau in zip(pv._ratios, pv._weights, pv._tau):
+        freqs = pv._freq * ratio
+        partial = np.sin(2 * np.pi * freqs[:, None] * t) * np.exp(-t / tau)
+        voice += partial * (weight * (freqs < pv._nyquist_guard))[:, None]
+    voice *= 1 - np.exp(-t / 0.003)
+    voice *= (pv._vel * pv._gain)[:, None]
+    theta = (pv._pan + 1) * np.pi / 4
+    return voice.T @ np.stack([np.cos(theta), np.sin(theta)], axis=1)
+
+
+@pytest.mark.parametrize("voice", ["pluck", "bell", "chime"])
+def test_polyvoice_matches_the_direct_formula(voice):
+    pv = PolyVoiceNode("v")
+    pv.set_properties({"voice": voice, "decay": 1.5, "max_voices": 12})
+    out = collect(pv.outputs["frames"])
+    rng = np.random.default_rng(7)
+    for block in range(24):
+        if block % 3 == 0:  # new notes, some above the Nyquist guard for the upper partials
+            notes = [[rng.uniform(80, 12000), rng.uniform(0.2, 1), rng.uniform(-1, 1)] for _ in range(3)]
+            pv.inputs["notes"].dispatch([np.array([notes], np.float32)])
+        n = (BLOCK, 1000, 4410, 37)[block % 4]
+        pv._start_pending()
+        expected = _polyvoice_reference(pv, n) if len(pv._freq) else np.zeros((n, 2))
+        pv.inputs["time"].dispatch(clock_block(n))
+        np.testing.assert_allclose(out[-1], expected, atol=2e-6)
+
+
+def _filter_reference(mode, cutoff, q, x, zi):
+    """ModFilter as sub-blocks of 128 samples, coefficients at each middle sample."""
+    from scipy.signal import lfilter
+
+    out = np.empty_like(x, dtype=np.float64)
+    for start in range(0, len(x), 128):
+        end = min(len(x), start + 128)
+        mid = (start + end - 1) >> 1
+        w0 = 2 * np.pi * min(max(cutoff[mid], 20.0), SR * 0.45) / SR
+        cw, sw = np.cos(w0), np.sin(w0)
+        alpha = sw / (2 * max(0.1, q[mid]))
+        b = {"lowpass": [(1 - cw) / 2, 1 - cw, (1 - cw) / 2],
+             "highpass": [(1 + cw) / 2, -(1 + cw), (1 + cw) / 2],
+             "bandpass": [alpha, 0.0, -alpha]}[mode]
+        a0 = 1 + alpha
+        out[start:end], zi = lfilter(np.array(b) / a0, [1.0, -2 * cw / a0, (1 - alpha) / a0], x[start:end], axis=0, zi=zi)
+    return out, zi
+
+
+@pytest.mark.parametrize("mode", ["lowpass", "highpass", "bandpass"])
+def test_filter_matches_the_sub_block_definition_gliding_and_steady(mode):
+    filt = ModFilterNode("f")
+    filt.set_properties({"mode": mode, "cutoff": 900.0, "q": 2.0, "glide": 0.05, "channels": 2})
+    out = collect(filt.outputs["frames"])
+    rng = np.random.default_rng(5)
+    zi = np.zeros((2, 2))
+    for block in range(12):
+        if block in (0, 6):  # glide to a new cutoff and q, then hold
+            filt.inputs["cutoff"].dispatch([np.array([rng.uniform(100, 8000)], np.float32)])
+            filt.inputs["q"].dispatch([np.array([rng.uniform(0.5, 8)], np.float32)])
+        x = rng.standard_normal((BLOCK, 2)).astype(np.float32)
+        cut0, cut_t, q0, q_t = filt._cutoff.current, filt._cutoff.target, filt._q.current, filt._q.target
+        filt.inputs["frames"].dispatch([x])
+        ramp = lambda c0, c1: np.minimum((np.arange(1, BLOCK + 1)) / (0.05 * SR), 1.0) * (c1 - c0) + c0
+        expected, zi = _filter_reference(mode, ramp(cut0, cut_t), ramp(q0, q_t), x, zi)
+        assert out[-1].dtype == np.float32
+        np.testing.assert_allclose(out[-1], expected, rtol=1e-4, atol=1e-4)
+
+
+def _freeverb_reference(x: np.ndarray, sr: int, room_size: float, damping: float) -> np.ndarray:
+    """Per-sample Freeverb: the wet signal of each channel (before width/mix)."""
+    from audio_nodes.dsp import reverb
+
+    scale = sr / 44100.0
+    spread = max(1, round(reverb._STEREO_SPREAD * scale))
+    feedback = room_size * 0.28 + 0.7
+    damp = damping * 0.4
+    mono = (x[:, 0].astype(np.float64) + x[:, 1]) * reverb._INPUT_GAIN
+    wet = []
+    for offset in (0, spread):
+        combs = [[np.zeros(max(1, round(d * scale)) + offset), 0, 0.0] for d in reverb._COMB_DELAYS]
+        aps = [[np.zeros(max(1, round(d * scale)) + offset), 0] for d in reverb._ALLPASS_DELAYS]
+        y = np.zeros(len(mono))
+        for k, sample in enumerate(mono):
+            acc = 0.0
+            for comb in combs:
+                buf, i, store = comb
+                out = buf[i]
+                store = out * (1 - damp) + store * damp
+                buf[i] = sample + store * feedback
+                comb[1], comb[2] = (i + 1) % len(buf), store
+                acc += out
+            for ap in aps:
+                buf, i = ap
+                delayed = buf[i]
+                buf[i] = acc + delayed * reverb._ALLPASS_FEEDBACK
+                ap[1] = (i + 1) % len(buf)
+                acc = delayed - acc
+            y[k] = acc
+        wet.append(y)
+    return np.stack(wet, axis=1)
+
+
+def test_reverb_matches_per_sample_freeverb():
+    # A low sample rate shortens the delays, so the rings wrap many times and
+    # blocks of odd sizes cross the chunk boundaries.
+    sr = 8000
+    rv = ReverbNode("r")
+    rv.set_properties({"sample_rate": sr, "room_size": 0.7, "damping": 0.6, "mix": 1.0, "width": 1.0})
+    out = collect(rv.outputs["frames"])
+    x = np.random.default_rng(11).standard_normal((3000, 2)).astype(np.float32)
+    pos = 0
+    for n in (1000, 37, 203, 1460, 300):
+        rv.inputs["frames"].dispatch([x[pos : pos + n]])
+        pos += n
+    expected = _freeverb_reference(x, sr, 0.7, 0.6)  # width 1, mix 1: out = wet
+    np.testing.assert_allclose(np.concatenate(out), expected, rtol=1e-5, atol=1e-6)
+
+
 # --- performance budget -----------------------------------------------------------------
 
 def test_block_budget_for_a_demo_sized_patch():

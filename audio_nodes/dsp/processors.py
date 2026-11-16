@@ -37,19 +37,32 @@ _FILTER_MODES = ("lowpass", "highpass", "bandpass")
 _SUBBLOCK = 128  # cutoff is re-evaluated this often within a block
 
 
-def _biquad(mode: str, fc: float, q: float, sr: float) -> tuple[np.ndarray, np.ndarray]:
-    """RBJ cookbook biquad coefficients (b, a), normalized so a[0] = 1."""
-    w0 = 2.0 * math.pi * fc / sr
-    cw, sw = math.cos(w0), math.sin(w0)
+def _biquads(mode: str, fc: np.ndarray, q: np.ndarray, sr: float) -> tuple[np.ndarray, np.ndarray]:
+    """RBJ cookbook biquad coefficients for each (fc, q): b (K, 3), a (K, 3), a[:, 0] = 1."""
+    w0 = (2.0 * math.pi / sr) * fc
+    cw, sw = np.cos(w0), np.sin(w0)
     alpha = sw / (2.0 * q)
+    k = len(fc)
+    b = np.empty((k, 3))
     if mode == "lowpass":
-        b = [(1 - cw) / 2, 1 - cw, (1 - cw) / 2]
+        b[:, 0] = (1 - cw) / 2
+        b[:, 1] = 1 - cw
+        b[:, 2] = b[:, 0]
     elif mode == "highpass":
-        b = [(1 + cw) / 2, -(1 + cw), (1 + cw) / 2]
+        b[:, 0] = (1 + cw) / 2
+        b[:, 1] = -(1 + cw)
+        b[:, 2] = b[:, 0]
     else:  # bandpass, 0 dB peak gain
-        b = [alpha, 0.0, -alpha]
+        b[:, 0] = alpha
+        b[:, 1] = 0.0
+        b[:, 2] = -alpha
     a0 = 1 + alpha
-    return np.array(b) / a0, np.array([1.0, -2 * cw / a0, (1 - alpha) / a0])
+    b /= a0[:, None]
+    a = np.empty((k, 3))
+    a[:, 0] = 1.0
+    a[:, 1] = -2 * cw / a0
+    a[:, 2] = (1 - alpha) / a0
+    return b, a
 
 
 class ModFilterNode(ChannelsNode):
@@ -109,14 +122,22 @@ class ModFilterNode(ChannelsNode):
         if zi is None:  # reset when the channel count changes
             zi = np.zeros((2, ch))
         nyquist_guard = sr * 0.45
+        # lfilter returns (y, zf) when zi is given; the stubs type it as a union.
+        if cutoff[0] == cutoff[-1] and q[0] == q[-1]:
+            # Not gliding (ramps are monotonic): one filter call for the block.
+            b, a = _biquads(mode, np.clip(cutoff[:1], 20.0, nyquist_guard), np.maximum(q[:1], 0.1), sr)
+            out, zi = lfilter(b[0], a[0], x, axis=0, zi=zi)  # type: ignore
+            self._zi = zi
+            self._out.dispatch([out.astype(x.dtype, copy=False)])
+            return
+        # Gliding: coefficients at the middle of each sub-block, all at once.
+        starts = np.arange(0, n, _SUBBLOCK)
+        mids = (starts + np.minimum(starts + _SUBBLOCK, n) - 1) >> 1
+        bs, as_ = _biquads(mode, np.clip(cutoff[mids], 20.0, nyquist_guard), np.maximum(q[mids], 0.1), sr)
         out = np.empty_like(x)
-        for start in range(0, n, _SUBBLOCK):
-            end = min(n, start + _SUBBLOCK)
-            mid = (start + end - 1) >> 1
-            fc = min(max(float(cutoff[mid]), 20.0), nyquist_guard)
-            b, a = _biquad(mode, fc, max(0.1, float(q[mid])), sr)
-            # lfilter returns (y, zf) when zi is given; the stubs type it as a union.
-            out[start:end], zi = lfilter(b, a, x[start:end], axis=0, zi=zi)  # type: ignore
+        for i, start in enumerate(starts.tolist()):
+            end = start + _SUBBLOCK
+            out[start:end], zi = lfilter(bs[i], as_[i], x[start:end], axis=0, zi=zi)  # type: ignore
         self._zi = zi
         self._out.dispatch([out])
 

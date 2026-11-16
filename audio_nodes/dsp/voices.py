@@ -31,6 +31,10 @@ _VOICES = {
     ),
 }
 _ATTACK_SECONDS = 0.003
+# exp(-t / attack) is below 1e-13 after this many attack times: older voices
+# skip the attack envelope.
+_ATTACK_SPAN = 30.0
+_ROW = 64  # samples per row of the exp tables (see PolyVoiceNode)
 
 
 class PolyVoiceNode(BaseNode):
@@ -38,6 +42,12 @@ class PolyVoiceNode(BaseNode):
 
     Voices are modal (a few exponentially decaying partials), rendered for all
     active voices at once with numpy — no per-sample Python loops.
+
+    A partial is Im(exp(s * (age + k))) with s = -1/tau + i*2*pi*f (per
+    sample). Instead of sin and exp for every voice, partial and sample, the
+    block is split into rows of _ROW samples: exp(s * (row_start + j)) =
+    exp(s * row_start) * exp(s * j), so each partial needs only two short
+    exp tables, and one batched matrix product sums the partials.
     """
 
     @classmethod
@@ -81,7 +91,9 @@ class PolyVoiceNode(BaseNode):
         self._vel = np.zeros(0)
         self._pan = np.zeros(0)
         self._age = np.zeros(0, dtype=np.int64)
-        self._ramp: np.ndarray | None = None  # cached 0..n-1
+        # Cached per block length n: (n, 0..n-1, row starts 0, _ROW, 2*_ROW, ...)
+        self._block: tuple[int, np.ndarray, np.ndarray] | None = None
+        self._row_offsets = np.arange(_ROW, dtype=np.float64)
         self._silence: np.ndarray | None = None  # cached read-only zeros
         self._mirror()
 
@@ -138,31 +150,36 @@ class PolyVoiceNode(BaseNode):
         self._out_active.dispatch([np.array([len(self._freq)], dtype=np.int32)])
 
     def _render(self, n: int) -> np.ndarray:
-        ramp = self._ramp
-        if ramp is None or len(ramp) != n:
-            ramp = self._ramp = np.arange(n, dtype=np.float64)
-        t = self._age[:, None] + ramp[None, :]  # (V, n), float64
-        t *= self._inv_sr
-        voice = np.zeros_like(t)
-        partial = np.empty_like(t)
-        envelope = np.empty_like(t)
-        limit = self._nyquist_guard
-        # One partial at a time keeps temporaries at (V, n) instead of (V, P, n).
-        for ratio, weight, decay in zip(self._ratios, self._weights, self._tau):
-            freqs = self._freq * ratio
-            audible = freqs < limit
-            if not audible.any():
-                continue
-            np.multiply(t, (2.0 * np.pi) * freqs[:, None], out=partial)
-            np.sin(partial, out=partial)
-            np.multiply(t, -1.0 / decay, out=envelope)
-            np.exp(envelope, out=envelope)
-            partial *= envelope
-            partial *= (weight * audible)[:, None]
-            voice += partial
-        np.multiply(t, -1.0 / _ATTACK_SECONDS, out=envelope)
-        np.exp(envelope, out=envelope)
-        voice *= 1.0 - envelope
+        block = self._block
+        if block is None or block[0] != n:
+            block = self._block = (n, np.arange(n, dtype=np.float64), np.arange(0, n, _ROW, dtype=np.float64))
+        _, ramp, row_starts = block
+        rows = len(row_starts)
+        age = self._age.astype(np.float64)  # (V,)
+
+        # s per voice and partial (V, P), per sample: -1/tau + i*2*pi*f.
+        freqs = self._freq[:, None] * self._ratios[None, :]
+        rate = (-1.0 / self._tau)[None, :] + (2.0j * np.pi) * freqs
+        rate *= self._inv_sr
+        amp = self._weights[None, :] * (freqs < self._nyquist_guard)  # inaudible partials weigh 0
+        start = amp * np.exp(rate * age[:, None])  # value at the block start
+        rate3 = rate[:, :, None]
+        by_row = start[:, :, None] * np.exp(rate3 * row_starts)  # (V, P, rows)
+        in_row = np.exp(rate3 * self._row_offsets)  # (V, P, _ROW)
+        # Im(by_row * in_row) summed over the partials = a matrix product:
+        # [re, im] (rows x 2P) @ [im; re] (2P x _ROW), batched over voices.
+        left = np.concatenate([np.real(by_row), np.imag(by_row)], axis=1).transpose(0, 2, 1)
+        right = np.concatenate([np.imag(in_row), np.real(in_row)], axis=1)
+        voice = np.matmul(left, right).reshape(len(age), rows * _ROW)[:, :n]
+
+        # Attack: only voices younger than _ATTACK_SPAN attack times.
+        attack_samples = _ATTACK_SECONDS / self._inv_sr
+        young = np.flatnonzero(self._age < attack_samples * _ATTACK_SPAN)
+        if len(young):
+            t = age[young, None] + ramp[None, :]
+            t *= -self._inv_sr / _ATTACK_SECONDS
+            envelope = -np.expm1(t)  # 1 - exp(-t / attack)
+            voice[young] *= envelope
         voice *= (self._vel * self._gain)[:, None]
 
         theta = (self._pan + 1.0) * (np.pi / 4.0)
