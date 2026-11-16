@@ -34,6 +34,9 @@ _ATTACK_SECONDS = 0.003
 # exp(-t / attack) is below 1e-13 after this many attack times: older voices
 # skip the attack envelope.
 _ATTACK_SPAN = 30.0
+# A stolen voice fades out over this time instead of stopping at once (a cut
+# mid-waveform is a click).
+_STEAL_FADE_SECONDS = 0.01
 _ROW = 64  # samples per row of the exp tables (see PolyVoiceNode)
 
 
@@ -56,8 +59,8 @@ class PolyVoiceNode(BaseNode):
             description=(
                 "Polyphonic percussive voices (pluck, bell, chime). Each row of "
                 "'notes' starts a voice at the next block; voices decay on "
-                "their own and are panned individually. Oldest voices are "
-                "stolen beyond max_voices."
+                "their own and are panned individually. Beyond max_voices the "
+                "oldest voices are stolen: they fade out over 10 ms."
             ),
             category="Audio",
             inputs={
@@ -91,6 +94,12 @@ class PolyVoiceNode(BaseNode):
         self._vel = np.zeros(0)
         self._pan = np.zeros(0)
         self._age = np.zeros(0, dtype=np.int64)
+        # Stolen voices fading out: the same fields, plus the fade samples left.
+        self._rel_freq = np.zeros(0)
+        self._rel_vel = np.zeros(0)
+        self._rel_pan = np.zeros(0)
+        self._rel_age = np.zeros(0, dtype=np.int64)
+        self._rel_left = np.zeros(0, dtype=np.int64)
         # Cached per block length n: (n, 0..n-1, row starts 0, _ROW, 2*_ROW, ...)
         self._block: tuple[int, np.ndarray, np.ndarray] | None = None
         self._row_offsets = np.arange(_ROW, dtype=np.float64)
@@ -111,6 +120,7 @@ class PolyVoiceNode(BaseNode):
         self._inv_sr = 1.0 / sr
         self._nyquist_guard = sr * 0.45
         self._life = float(self._tau[0]) * 6.0 * sr  # samples to ~ -52 dB on the fundamental
+        self._fade = max(1, round(_STEAL_FADE_SECONDS * sr))
 
     def _on_notes(self, values: list[PortValue]):
         for events in values[0]:
@@ -128,18 +138,23 @@ class PolyVoiceNode(BaseNode):
         self._vel = np.concatenate([self._vel, np.clip(events[:, 1], 0, 1)])
         self._pan = np.concatenate([self._pan, np.clip(events[:, 2], -1, 1)])
         self._age = np.concatenate([self._age, np.zeros(len(events), dtype=np.int64)])
-        limit = self._max_voices
-        if len(self._freq) > limit:  # steal the oldest (they come first)
-            keep = slice(len(self._freq) - limit, None)
-            self._freq, self._vel = self._freq[keep], self._vel[keep]
-            self._pan, self._age = self._pan[keep], self._age[keep]
+        cut = len(self._freq) - self._max_voices
+        if cut > 0:  # steal the oldest (they come first); those already sounding fade out
+            sounding = self._age[:cut] > 0
+            self._rel_freq = np.concatenate([self._rel_freq, self._freq[:cut][sounding]])
+            self._rel_vel = np.concatenate([self._rel_vel, self._vel[:cut][sounding]])
+            self._rel_pan = np.concatenate([self._rel_pan, self._pan[:cut][sounding]])
+            self._rel_age = np.concatenate([self._rel_age, self._age[:cut][sounding]])
+            self._rel_left = np.concatenate([self._rel_left, np.full(int(sounding.sum()), self._fade, np.int64)])
+            self._freq, self._vel = self._freq[cut:], self._vel[cut:]
+            self._pan, self._age = self._pan[cut:], self._age[cut:]
 
     def _on_time(self, values: list[PortValue]):
         n = len(values[0])
         if n == 0:
             return
         self._start_pending()
-        if len(self._freq):
+        if len(self._freq) or len(self._rel_freq):
             out = self._render(n)
         else:
             out = self._silence
@@ -155,10 +170,19 @@ class PolyVoiceNode(BaseNode):
             block = self._block = (n, np.arange(n, dtype=np.float64), np.arange(0, n, _ROW, dtype=np.float64))
         _, ramp, row_starts = block
         rows = len(row_starts)
-        age = self._age.astype(np.float64)  # (V,)
+        # Active voices, then the stolen ones still fading out.
+        fading = len(self._rel_freq)
+        if fading:
+            freq = np.concatenate([self._freq, self._rel_freq])
+            vel = np.concatenate([self._vel, self._rel_vel])
+            pan = np.concatenate([self._pan, self._rel_pan])
+            age_samples = np.concatenate([self._age, self._rel_age])
+        else:
+            freq, vel, pan, age_samples = self._freq, self._vel, self._pan, self._age
+        age = age_samples.astype(np.float64)  # (V,)
 
         # s per voice and partial (V, P), per sample: -1/tau + i*2*pi*f.
-        freqs = self._freq[:, None] * self._ratios[None, :]
+        freqs = freq[:, None] * self._ratios[None, :]
         rate = (-1.0 / self._tau)[None, :] + (2.0j * np.pi) * freqs
         rate *= self._inv_sr
         amp = self._weights[None, :] * (freqs < self._nyquist_guard)  # inaudible partials weigh 0
@@ -174,21 +198,31 @@ class PolyVoiceNode(BaseNode):
 
         # Attack: only voices younger than _ATTACK_SPAN attack times.
         attack_samples = _ATTACK_SECONDS / self._inv_sr
-        young = np.flatnonzero(self._age < attack_samples * _ATTACK_SPAN)
+        young = np.flatnonzero(age_samples < attack_samples * _ATTACK_SPAN)
         if len(young):
             t = age[young, None] + ramp[None, :]
             t *= -self._inv_sr / _ATTACK_SECONDS
             envelope = -np.expm1(t)  # 1 - exp(-t / attack)
             voice[young] *= envelope
-        voice *= (self._vel * self._gain)[:, None]
+        if fading:  # linear fade from where each stolen voice is now down to 0
+            left = self._rel_left.astype(np.float64)
+            voice[-fading:] *= np.clip((left[:, None] - ramp[None, :]) / self._fade, 0.0, 1.0)
+        voice *= (vel * self._gain)[:, None]
 
-        theta = (self._pan + 1.0) * (np.pi / 4.0)
+        theta = (pan + 1.0) * (np.pi / 4.0)
         stereo = np.matmul(voice.T, np.stack([np.cos(theta), np.sin(theta)], axis=1), dtype=np.float32)
 
         self._age += n
         alive = self._age < self._life
         self._freq, self._vel = self._freq[alive], self._vel[alive]
         self._pan, self._age = self._pan[alive], self._age[alive]
+        if fading:
+            self._rel_age += n
+            self._rel_left -= n
+            still = self._rel_left > 0
+            self._rel_freq, self._rel_vel = self._rel_freq[still], self._rel_vel[still]
+            self._rel_pan, self._rel_age = self._rel_pan[still], self._rel_age[still]
+            self._rel_left = self._rel_left[still]
         return stereo
 
     def set_properties(self, properties: dict[str, PropertyDataType]):

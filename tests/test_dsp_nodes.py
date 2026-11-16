@@ -271,16 +271,24 @@ def test_reverb_tail_and_dry_passthrough():
 
 
 def _polyvoice_reference(pv: PolyVoiceNode, n: int) -> np.ndarray:
-    """The modal voice formula, evaluated directly (sin and exp per sample)."""
-    t = (pv._age[:, None] + np.arange(n)[None, :]) / SR
+    """The modal voice formula, evaluated directly (sin and exp per sample).
+
+    Active voices, plus the stolen ones fading out linearly over the samples they have left.
+    """
+    k = np.arange(n)[None, :]
+    freq = np.concatenate([pv._freq, pv._rel_freq])
+    age = np.concatenate([pv._age, pv._rel_age])
+    t = (age[:, None] + k) / SR
     voice = np.zeros_like(t)
     for ratio, weight, tau in zip(pv._ratios, pv._weights, pv._tau):
-        freqs = pv._freq * ratio
+        freqs = freq * ratio
         partial = np.sin(2 * np.pi * freqs[:, None] * t) * np.exp(-t / tau)
         voice += partial * (weight * (freqs < pv._nyquist_guard))[:, None]
     voice *= 1 - np.exp(-t / 0.003)
-    voice *= (pv._vel * pv._gain)[:, None]
-    theta = (pv._pan + 1) * np.pi / 4
+    gain = np.ones_like(t)
+    gain[len(pv._freq):] = np.clip((pv._rel_left[:, None] - k) / pv._fade, 0, 1)
+    voice *= gain * (np.concatenate([pv._vel, pv._rel_vel]) * pv._gain)[:, None]
+    theta = (np.concatenate([pv._pan, pv._rel_pan]) + 1) * np.pi / 4
     return voice.T @ np.stack([np.cos(theta), np.sin(theta)], axis=1)
 
 
@@ -290,15 +298,46 @@ def test_polyvoice_matches_the_direct_formula(voice):
     pv.set_properties({"voice": voice, "decay": 1.5, "max_voices": 12})
     out = collect(pv.outputs["frames"])
     rng = np.random.default_rng(7)
+    stolen = False
     for block in range(24):
         if block % 3 == 0:  # new notes, some above the Nyquist guard for the upper partials
             notes = [[rng.uniform(80, 12000), rng.uniform(0.2, 1), rng.uniform(-1, 1)] for _ in range(3)]
             pv.inputs["notes"].dispatch([np.array([notes], np.float32)])
         n = (BLOCK, 1000, 4410, 37)[block % 4]
         pv._start_pending()
-        expected = _polyvoice_reference(pv, n) if len(pv._freq) else np.zeros((n, 2))
+        stolen = stolen or len(pv._rel_freq) > 0
+        expected = _polyvoice_reference(pv, n) if len(pv._freq) + len(pv._rel_freq) else np.zeros((n, 2))
         pv.inputs["time"].dispatch(clock_block(n))
         np.testing.assert_allclose(out[-1], expected, atol=2e-6)
+    assert stolen, "the test should steal sounding voices"
+
+
+def test_polyvoice_fades_a_stolen_voice_instead_of_cutting_it():
+    def play(notes_by_block, blocks):
+        pv = PolyVoiceNode("v")
+        pv.set_properties({"voice": "pluck", "decay": 2.0, "max_voices": 1})
+        out = collect(pv.outputs["frames"])
+        for b in range(blocks):
+            if b in notes_by_block:
+                pv.inputs["notes"].dispatch([np.array([notes_by_block[b]], np.float32)])
+            pv.inputs["time"].dispatch(clock_block())
+        return np.concatenate(out)[:, 0]
+
+    first, second = [[317.0, 1.0, 0.0]], [[523.25, 1.0, 0.0]]  # 317 Hz is mid-swing at the steal
+    stolen = play({0: first, 3: second}, 5)  # the second note steals the first, still loud
+    alone = play({0: first}, 5)
+    newcomer = play({3: second}, 5)
+    at = 3 * BLOCK
+    fade = round(0.01 * SR)
+    # No step: the stolen voice goes on where it was, the new one starts from silence
+    assert stolen[at] == pytest.approx(alone[at] + newcomer[at], abs=1e-6)
+    assert abs(alone[at]) > 0.01
+    # It is gone after the fade: only the new voice is left
+    np.testing.assert_allclose(stolen[at + fade:], newcomer[at + fade:], atol=1e-6)
+    # In between, the stolen voice is itself times a linear ramp from 1 to 0
+    k = np.arange(fade + 50)
+    ramp = np.clip((fade - k) / fade, 0, 1)
+    np.testing.assert_allclose((stolen - newcomer)[at : at + fade + 50], alone[at : at + fade + 50] * ramp, atol=1e-6)
 
 
 def _filter_reference(mode, cutoff, q, x, zi):
