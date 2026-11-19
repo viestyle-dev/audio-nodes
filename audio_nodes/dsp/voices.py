@@ -50,7 +50,8 @@ class PolyVoiceNode(BaseNode):
     sample). Instead of sin and exp for every voice, partial and sample, the
     block is split into rows of _ROW samples: exp(s * (row_start + j)) =
     exp(s * row_start) * exp(s * j), so each partial needs only two short
-    exp tables, and one batched matrix product sums the partials.
+    exp tables, and one batched matrix product sums the partials. The table
+    over j is the same for every block: it is made when a voice starts.
     """
 
     @classmethod
@@ -94,12 +95,15 @@ class PolyVoiceNode(BaseNode):
         self._vel = np.zeros(0)
         self._pan = np.zeros(0)
         self._age = np.zeros(0, dtype=np.int64)
+        # exp(s * j), j = 0.._ROW-1, per voice and partial (V, P, _ROW): constant for a voice
+        self._in_row = np.zeros((0, 0, _ROW), dtype=np.complex128)
         # Stolen voices fading out: the same fields, plus the fade samples left.
         self._rel_freq = np.zeros(0)
         self._rel_vel = np.zeros(0)
         self._rel_pan = np.zeros(0)
         self._rel_age = np.zeros(0, dtype=np.int64)
         self._rel_left = np.zeros(0, dtype=np.int64)
+        self._rel_in_row = np.zeros((0, 0, _ROW), dtype=np.complex128)
         # Cached per block length n: (n, 0..n-1, row starts 0, _ROW, 2*_ROW, ...)
         self._block: tuple[int, np.ndarray, np.ndarray] | None = None
         self._row_offsets = np.arange(_ROW, dtype=np.float64)
@@ -121,6 +125,19 @@ class PolyVoiceNode(BaseNode):
         self._nyquist_guard = sr * 0.45
         self._life = float(self._tau[0]) * 6.0 * sr  # samples to ~ -52 dB on the fundamental
         self._fade = max(1, round(_STEAL_FADE_SECONDS * sr))
+        self._in_row = self._row_table(self._freq)
+        self._rel_in_row = self._row_table(self._rel_freq)
+
+    def _rate(self, freq: np.ndarray) -> np.ndarray:
+        """s per voice and partial (V, P), per sample: -1/tau + i*2*pi*f."""
+        freqs = freq[:, None] * self._ratios[None, :]
+        rate = (-1.0 / self._tau)[None, :] + (2.0j * np.pi) * freqs
+        rate *= self._inv_sr
+        return rate
+
+    def _row_table(self, freq: np.ndarray) -> np.ndarray:
+        """exp(s * j) for j in one row (V, P, _ROW)."""
+        return np.exp(self._rate(freq)[:, :, None] * self._row_offsets)
 
     def _on_notes(self, values: list[PortValue]):
         for events in values[0]:
@@ -138,6 +155,7 @@ class PolyVoiceNode(BaseNode):
         self._vel = np.concatenate([self._vel, np.clip(events[:, 1], 0, 1)])
         self._pan = np.concatenate([self._pan, np.clip(events[:, 2], -1, 1)])
         self._age = np.concatenate([self._age, np.zeros(len(events), dtype=np.int64)])
+        self._in_row = np.concatenate([self._in_row, self._row_table(self._freq[len(self._in_row) :])])
         cut = len(self._freq) - self._max_voices
         if cut > 0:  # steal the oldest (they come first); those already sounding fade out
             sounding = self._age[:cut] > 0
@@ -146,8 +164,10 @@ class PolyVoiceNode(BaseNode):
             self._rel_pan = np.concatenate([self._rel_pan, self._pan[:cut][sounding]])
             self._rel_age = np.concatenate([self._rel_age, self._age[:cut][sounding]])
             self._rel_left = np.concatenate([self._rel_left, np.full(int(sounding.sum()), self._fade, np.int64)])
+            self._rel_in_row = np.concatenate([self._rel_in_row, self._in_row[:cut][sounding]])
             self._freq, self._vel = self._freq[cut:], self._vel[cut:]
             self._pan, self._age = self._pan[cut:], self._age[cut:]
+            self._in_row = self._in_row[cut:]
 
     def _on_time(self, values: list[PortValue]):
         n = len(values[0])
@@ -177,19 +197,17 @@ class PolyVoiceNode(BaseNode):
             vel = np.concatenate([self._vel, self._rel_vel])
             pan = np.concatenate([self._pan, self._rel_pan])
             age_samples = np.concatenate([self._age, self._rel_age])
+            in_row = np.concatenate([self._in_row, self._rel_in_row])
         else:
             freq, vel, pan, age_samples = self._freq, self._vel, self._pan, self._age
+            in_row = self._in_row  # (V, P, _ROW)
         age = age_samples.astype(np.float64)  # (V,)
 
-        # s per voice and partial (V, P), per sample: -1/tau + i*2*pi*f.
-        freqs = freq[:, None] * self._ratios[None, :]
-        rate = (-1.0 / self._tau)[None, :] + (2.0j * np.pi) * freqs
-        rate *= self._inv_sr
-        amp = self._weights[None, :] * (freqs < self._nyquist_guard)  # inaudible partials weigh 0
+        rate = self._rate(freq)
+        audible = (freq[:, None] * self._ratios[None, :]) < self._nyquist_guard
+        amp = self._weights[None, :] * audible  # inaudible partials weigh 0
         start = amp * np.exp(rate * age[:, None])  # value at the block start
-        rate3 = rate[:, :, None]
-        by_row = start[:, :, None] * np.exp(rate3 * row_starts)  # (V, P, rows)
-        in_row = np.exp(rate3 * self._row_offsets)  # (V, P, _ROW)
+        by_row = start[:, :, None] * np.exp(rate[:, :, None] * row_starts)  # (V, P, rows)
         # Im(by_row * in_row) summed over the partials = a matrix product:
         # [re, im] (rows x 2P) @ [im; re] (2P x _ROW), batched over voices.
         left = np.concatenate([np.real(by_row), np.imag(by_row)], axis=1).transpose(0, 2, 1)
@@ -216,6 +234,7 @@ class PolyVoiceNode(BaseNode):
         alive = self._age < self._life
         self._freq, self._vel = self._freq[alive], self._vel[alive]
         self._pan, self._age = self._pan[alive], self._age[alive]
+        self._in_row = self._in_row[alive]
         if fading:
             self._rel_age += n
             self._rel_left -= n
@@ -223,6 +242,7 @@ class PolyVoiceNode(BaseNode):
             self._rel_freq, self._rel_vel = self._rel_freq[still], self._rel_vel[still]
             self._rel_pan, self._rel_age = self._rel_pan[still], self._rel_age[still]
             self._rel_left = self._rel_left[still]
+            self._rel_in_row = self._rel_in_row[still]
         return stereo
 
     def set_properties(self, properties: dict[str, PropertyDataType]):
