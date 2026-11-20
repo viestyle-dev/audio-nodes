@@ -1,10 +1,12 @@
 # audio-nodes
 
-A nonoha-engine plugin for audio playback and streaming, providing audio device control and file streaming capabilities within the nonoha-engine visual programming environment.
+A nonoha-engine plugin for audio playback and streaming, providing audio device control and file streaming capabilities within the nonoha-engine visual programming environment. Since 1.1.0 it also provides block-based synthesis: a demand-driven clock, oscillators, noise, filters, panning, mixing, envelopes, polyphonic voices and reverb.
+
+[audio-nodes on nonoha Hub](https://hub.nonoha.dev/plugins/official/nonoha-official/audio-nodes/): the published versions, and the engine versions and platforms they support.
 
 ## Overview
 
-This plugin provides specialized nodes for audio playback using sounddevice and soundfile libraries. It enables real-time audio streaming, file playback with preloading, and audio device management.
+This plugin provides specialized nodes for audio playback using sounddevice and soundfile libraries. It enables real-time audio streaming, file playback with preloading, and audio device management. The synthesis nodes compute audio in blocks with numpy and scipy, and generate only as much as the player asks for.
 
 ## Features
 
@@ -57,6 +59,30 @@ This plugin provides specialized nodes for audio playback using sounddevice and 
   - Gain starts at 0.0, so playback always fades in from silence
   - Chain two instances for independent fade and volume stages:
     `AudioFileStream → AudioGain(fade) → AudioGain(volume) → AudioDevicePlayStream`
+
+**Synthesis** (since 1.1.0)
+
+Audio flows between these nodes as `frames`: float32 arrays of shape `(samples, channels)`, one block per dispatch. `AudioClock` drives them with blocks of per-sample time (float64, in seconds).
+
+- **AudioClock**: Demand-driven block clock
+  - `start` emits `prefill_blocks` blocks to fill the player's buffer; each `demand` (e.g. from `AudioDevicePlayStream`'s `buffer_low`) emits `blocks_per_demand` more
+  - Nothing runs on a timer, so generation follows playback and never runs ahead or falls behind
+- **Oscillator**: Sine, triangle, saw or square (saw and square are band-limited). It keeps its own phase, so frequency changes glide without clicks
+- **Noise**: White, pink (-3 dB/oct) or brown (-6 dB/oct) noise
+- **ModFilter**: Low-, high- or band-pass biquad whose cutoff and Q follow their inputs. The filter state carries across blocks, so sweeps are continuous
+- **Panner**: Equal-power panner: places a mono signal between left (-1) and right (+1)
+- **Mixer**: Sums its inputs once every input has delivered the block, so the result does not depend on the order in which upstream branches run
+- **Envelope**: ADSR envelope applied to audio (a VCA), driven by a `gate` input
+- **SoftClip**: tanh soft clipper: keeps a busy mix within -1..1 without hard clipping
+- **PolyVoice**: Polyphonic percussive voices (pluck, bell, chime). Each row of `notes` starts a voice that decays on its own; beyond `max_voices` the oldest voices are stolen
+- **Reverb**: Stereo Freeverb reverb with room size, damping, width and wet/dry mix
+
+Every node's ports and properties are also described in the engine's node catalog and in the editor.
+
+### Registration
+
+- `register_nodes`: every node. This is the entry point plugin hosts call.
+- `register_portable_nodes`: the synthesis nodes and AudioGain only (no audio device, no files), for runtimes where the host app owns audio output and plays the frames a graph produces.
 
 ## Installation
 
@@ -140,6 +166,15 @@ Insert `AudioGain` nodes between them for volume control and fades. Note
 that gain applied upstream of the output buffer becomes audible only after
 the buffered audio drains (≈ `buffer_duration` seconds of latency).
 
+### Example: Synthesis
+
+1. Add `AudioClock`, `Oscillator`, `Panner` and `AudioDevicePlayStream` nodes (their defaults match: 44.1 kHz, and 2 channels at the player)
+2. Connect `AudioClock.time` to `Oscillator.time`, `Oscillator.frames` to `Panner.frames` (the oscillator is mono; the panner makes it stereo), and `Panner.frames` to `AudioDevicePlayStream.frames`
+3. Connect `AudioDevicePlayStream.buffer_low` to `AudioClock.demand`, so the clock produces more blocks when the buffer runs low
+4. Send any value to `AudioClock.start`; when `primed` turns true, start playback (`play`)
+
+Put `Envelope`, `ModFilter`, `Panner`, `Mixer`, `Reverb` and `SoftClip` between the oscillator and the player to shape the sound.
+
 ## Device Selection (`device_id`)
 
 The `device_id` property of the playback nodes accepts, mirroring
@@ -180,9 +215,10 @@ startup time before all nodes reach the `stopped` state.
 
 - Python >= 3.11
 - nonoha-core (nonoha-engine core library)
-- sounddevice (audio I/O)
+- sounddevice (audio I/O; not installed on Android and iOS, where the host app plays the audio)
 - soundfile (audio file reading)
 - numpy (array processing)
+- scipy >= 1.11 (filters of the synthesis nodes)
 
 ### Platform-Specific Requirements
 

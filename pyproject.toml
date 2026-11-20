@@ -42,4 +42,3 @@ build-backend = "hatchling.build"
 
 [tool.nonoha-hub]
 engine-compatibility = [">=1.0.0", "<2.0.0"]
-published-as = { registry = "official", owner = "nonoha-official", name = "audio-nodes", version = "1.0.0" }
