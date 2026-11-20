@@ -29,7 +29,7 @@ from ._common import (
     steps,
 )
 
-_CHANNELS_PROPERTY: PropertyDescription = {"description": "Channel count of the frames ports", "default_value": 1}
+_CHANNELS_PROPERTY: PropertyDescription = {"description": "Channel count of the frames ports", "data_type": "i32", "default_value": 1}
 
 # --- ModFilter -------------------------------------------------------------------
 
@@ -86,10 +86,10 @@ class ModFilterNode(ChannelsNode):
         )
 
     PROPERTIES = {
-        "mode": {"description": "lowpass, highpass or bandpass", "default_value": "lowpass"},
-        "cutoff": {"description": "Initial cutoff in Hz", "default_value": 1000.0},
-        "q": {"description": "Initial Q", "default_value": 0.707},
-        "glide": {"description": "Seconds to reach a new cutoff/Q", "default_value": 0.05},
+        "mode": {"description": "lowpass, highpass or bandpass", "data_type": "str", "default_value": "lowpass"},
+        "cutoff": {"description": "Initial cutoff in Hz", "data_type": "f64", "default_value": 1000.0},
+        "q": {"description": "Initial Q", "data_type": "f64", "default_value": 0.707},
+        "glide": {"description": "Seconds to reach a new cutoff/Q", "data_type": "f64", "default_value": 0.05},
         "channels": _CHANNELS_PROPERTY,
         "sample_rate": SAMPLE_RATE_PROPERTY,
     }
@@ -178,8 +178,8 @@ class PannerNode(BaseNode):
         )
 
     PROPERTIES = {
-        "pan": {"description": "Initial position -1..+1", "default_value": 0.0},
-        "glide": {"description": "Seconds to reach a new position", "default_value": 0.05},
+        "pan": {"description": "Initial position -1..+1", "data_type": "f64", "default_value": 0.0},
+        "glide": {"description": "Seconds to reach a new position", "data_type": "f64", "default_value": 0.05},
         "sample_rate": SAMPLE_RATE_PROPERTY,
     }
 
@@ -237,9 +237,9 @@ class MixerNode(BaseNode):
         )
 
     PROPERTIES = {
-        "inputs": {"description": "Number of inputs (1-16)", "default_value": 4},
-        "gain": {"description": "Output gain", "default_value": 1.0},
-        "channels": {"description": "Channel count of all frames ports", "default_value": 2},
+        "inputs": {"description": "Number of inputs (1-16)", "data_type": "i32", "default_value": 4},
+        "gain": {"description": "Output gain", "data_type": "f64", "default_value": 1.0},
+        "channels": {"description": "Channel count of all frames ports", "data_type": "i32", "default_value": 2},
     }
 
     def __init__(self, name: str):
@@ -346,10 +346,10 @@ class EnvelopeNode(ChannelsNode):
         )
 
     PROPERTIES = {
-        "attack": {"description": "Attack seconds", "default_value": 0.01},
-        "decay": {"description": "Decay seconds", "default_value": 0.2},
-        "sustain": {"description": "Sustain level 0-1", "default_value": 0.7},
-        "release": {"description": "Release seconds", "default_value": 0.5},
+        "attack": {"description": "Attack seconds", "data_type": "f64", "default_value": 0.01},
+        "decay": {"description": "Decay seconds", "data_type": "f64", "default_value": 0.2},
+        "sustain": {"description": "Sustain level 0-1", "data_type": "f64", "default_value": 0.7},
+        "release": {"description": "Release seconds", "data_type": "f64", "default_value": 0.5},
         "channels": _CHANNELS_PROPERTY,
         "sample_rate": SAMPLE_RATE_PROPERTY,
     }
@@ -460,8 +460,8 @@ class SoftClipNode(ChannelsNode):
         )
 
     PROPERTIES = {
-        "drive": {"description": "Drive (> 0); higher = earlier saturation", "default_value": 1.0},
-        "channels": {"description": "Channel count of the frames ports", "default_value": 2},
+        "drive": {"description": "Drive (> 0); higher = earlier saturation", "data_type": "f64", "default_value": 1.0},
+        "channels": {"description": "Channel count of the frames ports", "data_type": "i32", "default_value": 2},
     }
 
     def __init__(self, name: str):

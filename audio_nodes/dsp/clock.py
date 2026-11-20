@@ -43,9 +43,9 @@ class AudioClockNode(BaseNode):
 
     PROPERTIES = {
         "sample_rate": SAMPLE_RATE_PROPERTY,
-        "block_size": {"description": "Samples per block (2205 = 50 ms at 44.1 kHz)", "default_value": 2205},
-        "prefill_blocks": {"description": "Blocks emitted on start", "default_value": 12},
-        "blocks_per_demand": {"description": "Blocks emitted per demand", "default_value": 2},
+        "block_size": {"description": "Samples per block (2205 = 50 ms at 44.1 kHz)", "data_type": "i32", "default_value": 2205},
+        "prefill_blocks": {"description": "Blocks emitted on start", "data_type": "i32", "default_value": 12},
+        "blocks_per_demand": {"description": "Blocks emitted per demand", "data_type": "i32", "default_value": 2},
     }
 
     def __init__(self, name: str):

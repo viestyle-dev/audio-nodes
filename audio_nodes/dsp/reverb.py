@@ -119,10 +119,10 @@ class ReverbNode(BaseNode):
         )
 
     PROPERTIES = {
-        "room_size": {"description": "Room size 0-1 (decay length)", "default_value": 0.8},
-        "damping": {"description": "High-frequency damping 0-1", "default_value": 0.5},
-        "width": {"description": "Stereo width 0-1", "default_value": 1.0},
-        "mix": {"description": "Wet/dry mix 0-1", "default_value": 0.3},
+        "room_size": {"description": "Room size 0-1 (decay length)", "data_type": "f64", "default_value": 0.8},
+        "damping": {"description": "High-frequency damping 0-1", "data_type": "f64", "default_value": 0.5},
+        "width": {"description": "Stereo width 0-1", "data_type": "f64", "default_value": 1.0},
+        "mix": {"description": "Wet/dry mix 0-1", "data_type": "f64", "default_value": 0.3},
         "sample_rate": SAMPLE_RATE_PROPERTY,
     }
 

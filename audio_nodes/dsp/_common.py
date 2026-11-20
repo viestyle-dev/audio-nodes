@@ -99,7 +99,7 @@ class Glide:
         return out
 
 
-SAMPLE_RATE_PROPERTY: PropertyDescription = {"description": "Sample rate in Hz", "default_value": 44100}
+SAMPLE_RATE_PROPERTY: PropertyDescription = {"description": "Sample rate in Hz", "data_type": "i32", "default_value": 44100}
 
 
 class ChannelsNode(BaseNode):

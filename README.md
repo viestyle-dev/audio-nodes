@@ -77,7 +77,7 @@ Audio flows between these nodes as `frames`: float32 arrays of shape `(samples, 
 - **PolyVoice**: Polyphonic percussive voices (pluck, bell, chime). Each row of `notes` starts a voice that decays on its own; beyond `max_voices` the oldest voices are stolen
 - **Reverb**: Stereo Freeverb reverb with room size, damping, width and wet/dry mix
 
-Every node's ports and properties are also described in the engine's node catalog and in the editor.
+Every node's ports and properties are also described in the engine's node catalog and in the editor. Every property also has an input port (`@<name>`, for example `@cutoff`), so another node's output can set it.
 
 ### Registration
 

@@ -47,11 +47,11 @@ class OscillatorNode(BaseNode):
         )
 
     PROPERTIES = {
-        "waveform": {"description": "sine, triangle, saw or square", "default_value": "sine"},
-        "frequency": {"description": "Initial frequency in Hz", "default_value": 220.0},
-        "amplitude": {"description": "Initial peak amplitude", "default_value": 0.2},
-        "glide": {"description": "Seconds to reach a new frequency/amplitude", "default_value": 0.05},
-        "sample_rate": {"description": "Sample rate in Hz", "default_value": 44100},
+        "waveform": {"description": "sine, triangle, saw or square", "data_type": "str", "default_value": "sine"},
+        "frequency": {"description": "Initial frequency in Hz", "data_type": "f64", "default_value": 220.0},
+        "amplitude": {"description": "Initial peak amplitude", "data_type": "f64", "default_value": 0.2},
+        "glide": {"description": "Seconds to reach a new frequency/amplitude", "data_type": "f64", "default_value": 0.05},
+        "sample_rate": {"description": "Sample rate in Hz", "data_type": "i32", "default_value": 44100},
     }
 
     def __init__(self, name: str):
@@ -149,10 +149,10 @@ class NoiseNode(BaseNode):
 
     PROPERTIES = {
         "color": {"description": "white, pink or brown", "data_type": "str", "default_value": "pink"},
-        "amplitude": {"description": "Initial level", "default_value": 0.1},
-        "glide": {"description": "Seconds to reach a new amplitude", "default_value": 0.1},
-        "seed": {"description": "Random seed (0 = different every run)", "default_value": 0},
-        "sample_rate": {"description": "Sample rate in Hz", "default_value": 44100},
+        "amplitude": {"description": "Initial level", "data_type": "f64", "default_value": 0.1},
+        "glide": {"description": "Seconds to reach a new amplitude", "data_type": "f64", "default_value": 0.1},
+        "seed": {"description": "Random seed (0 = different every run)", "data_type": "i32", "default_value": 0},
+        "sample_rate": {"description": "Sample rate in Hz", "data_type": "i32", "default_value": 44100},
     }
 
     def __init__(self, name: str):

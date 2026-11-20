@@ -76,10 +76,10 @@ class PolyVoiceNode(BaseNode):
 
     PROPERTIES = {
         "voice": {"description": "pluck, bell or chime", "data_type": "str", "default_value": "bell"},
-        "decay": {"description": "Decay time of the fundamental in seconds", "default_value": 2.0},
-        "brightness": {"description": "0-1: weight of the upper partials", "default_value": 0.6},
-        "gain": {"description": "Output gain per voice", "default_value": 0.25},
-        "max_voices": {"description": "Maximum simultaneous voices", "default_value": 16},
+        "decay": {"description": "Decay time of the fundamental in seconds", "data_type": "f64", "default_value": 2.0},
+        "brightness": {"description": "0-1: weight of the upper partials", "data_type": "f64", "default_value": 0.6},
+        "gain": {"description": "Output gain per voice", "data_type": "f64", "default_value": 0.25},
+        "max_voices": {"description": "Maximum simultaneous voices", "data_type": "i32", "default_value": 16},
         "sample_rate": SAMPLE_RATE_PROPERTY,
     }
 
